@@ -7,12 +7,6 @@ interface FloatingState {
   targetPosX: number;
   targetPosY: number;
   targetRotation: number;
-  zoomAnchorFocalX: number;
-  zoomAnchorFocalY: number;
-  zoomAnchorBasePosX: number;
-  zoomAnchorBasePosY: number;
-  zoomAnchorBaseScale: number;
-  isZooming: boolean;
   isDragging: boolean;
   isPinching: boolean;
   startX: number;
@@ -221,12 +215,6 @@ export function setup() {
     targetPosX: saved ? saved.posX : defaultInitialX,
     targetPosY: saved ? saved.posY : defaultInitialY,
     targetRotation: 0,
-    zoomAnchorFocalX: 0,
-    zoomAnchorFocalY: 0,
-    zoomAnchorBasePosX: saved ? saved.posX : defaultInitialX,
-    zoomAnchorBasePosY: saved ? saved.posY : defaultInitialY,
-    zoomAnchorBaseScale: saved ? saved.scale : 1,
-    isZooming: false,
     isDragging: false,
     isPinching: false,
     startX: 0,
@@ -244,16 +232,34 @@ export function setup() {
   let animLoopRunning = false;
   let lastFrameTime = performance.now();
 
+  // Janitor-exact spring, decompiled from useDragControl-CP3ezJEq.js:
+  // framer-motion useSpring { stiffness: 350, damping: 22, mass: 1 }
+  // → damping ratio ≈ 0.59 (underdamped): trails the pointer, settles with
+  //   a whisper of overshoot. No speed caps anywhere.
+  const SPRING_STIFFNESS = 350;
+  const SPRING_DAMPING = 22;
+  const SPRING_MASS = 1;
+  const vel = { x: 0, y: 0, scale: 0, rot: 0 };
+
   function renderTransform() {
     overlay.style.transform = `translateX(${state.posX.toFixed(3)}px) translateY(${state.posY.toFixed(3)}px) scale(${state.scale.toFixed(4)})`;
     tiltWrapper.style.transform = `rotate(${state.rotation.toFixed(3)}deg)`;
   }
 
-  // Unified Physics Engine:
-  // - Focal zoom interpolation is mathematically locked: position is derived continuously from scale,
-  //   preventing any focal drift, mismatch, or stuttering across any scale threshold!
-  // - Drag maintains subtle resistance and governed velocity
-  // - Rotation smoothly snaps back to 0° upon release
+  // Unified Physics Engine — ported 1:1 from Janitor's useDragControl hook
+  // (decompiled from assets.janitorai.com/useDragControl-CP3ezJEq.js):
+  //
+  //   const SPRING = { damping: 22, stiffness: 350 };
+  //   onDrag: ({ offset: [dx, dy] }) => { rawX.set(dx); rawY.set(dy); }   // instant targets
+  //   drag:   { from: () => [x.get(), y.get()] }                          // grab from LAGGING pos
+  //   style:  { x, y, scale, rotateZ }                                    // springs drive render
+  //
+  // So: pointer writes targets instantly, rendered values chase them through
+  // an underdamped spring (ζ ≈ 0.59) — trails slightly, settles with a whisper
+  // of overshoot. No speed caps, no lerp, no rubberband on drag.
+  // Pinch (also 1:1): scale target = pinchStartScale * distRatio (clamped
+  // 0.5–4), rotation = twist angle offset, position keeps the two-finger
+  // midpoint stationary. Everything still flows through the same spring.
   function runPhysicsLoop() {
     if (animLoopRunning) return;
     animLoopRunning = true;
@@ -263,84 +269,51 @@ export function setup() {
       const dt = Math.min((now - lastFrameTime) / 1000, 0.04);
       lastFrameTime = now;
 
-      // 1. Zoom Interpolation (Butter-smooth, zero-stutter focal tracking)
-      if (state.isZooming) {
-        const dScale = state.targetScale - state.scale;
-        if (Math.abs(dScale) > 0.0004) {
-          // Continuous smooth exponential approach (22.0 rate for snappy yet organic zoom)
-          state.scale += dScale * Math.min(1, 22.0 * dt);
-          // Derived position: exact focal invariant formula at every sub-frame
-          const ratio = state.scale / state.zoomAnchorBaseScale;
-          state.posX = state.zoomAnchorFocalX - (state.zoomAnchorFocalX - state.zoomAnchorBasePosX) * ratio;
-          state.posY = state.zoomAnchorFocalY - (state.zoomAnchorFocalY - state.zoomAnchorBasePosY) * ratio;
-          state.targetPosX = state.posX;
-          state.targetPosY = state.posY;
-        } else {
-          state.scale = state.targetScale;
-          const ratio = state.scale / state.zoomAnchorBaseScale;
-          state.posX = state.zoomAnchorFocalX - (state.zoomAnchorFocalX - state.zoomAnchorBasePosX) * ratio;
-          state.posY = state.zoomAnchorFocalY - (state.zoomAnchorFocalY - state.zoomAnchorBasePosY) * ratio;
-          state.targetPosX = state.posX;
-          state.targetPosY = state.posY;
-          state.isZooming = false;
-        }
-      } else if (!state.isPinching) {
-        // 2. Drag Translation Physics (When not zooming)
-        const dX = state.targetPosX - state.posX;
-        const dY = state.targetPosY - state.posY;
-        const dist = Math.hypot(dX, dY);
+      // Integrate with 4 substeps per frame: semi-implicit Euler is symplectic
+      // and slightly overdamps at 60Hz; quarter-steps bring the visible
+      // overshoot within ~1% of framer-motion's analytic response.
+      const SUBSTEPS = 4;
+      const h = dt / SUBSTEPS;
+      for (let s = 0; s < SUBSTEPS; s++) {
+        // --- 1. Position spring (x, y) ---
+        // Hooke: F = -k*(x - target) - c*v  ≡  k*(target - x) - c*v
+        const Fx = SPRING_STIFFNESS * (state.targetPosX - state.posX) - SPRING_DAMPING * vel.x;
+        const Fy = SPRING_STIFFNESS * (state.targetPosY - state.posY) - SPRING_DAMPING * vel.y;
+        vel.x += (Fx / SPRING_MASS) * h;
+        vel.y += (Fy / SPRING_MASS) * h;
+        state.posX += vel.x * h;
+        state.posY += vel.y * h;
 
-        if (dist > 0.08) {
-          const MAX_SPEED = 1400; // px/sec: regulated velocity ceiling
-          const CHASE_RATE = 15.0; // Natural elastic pull rate
+        // --- 2. Rotation spring (rotateZ) — same spring config as x/y ---
+        // Janitor: const [rot, springRot] = [useMotionValue(0), useSpring(rot, SPRING)]
+        const FRot = SPRING_STIFFNESS * (state.targetRotation - state.rotation) - SPRING_DAMPING * vel.rot;
+        vel.rot += (FRot / SPRING_MASS) * h;
+        state.rotation += vel.rot * h;
 
-          const desiredSpeed = Math.min(dist * CHASE_RATE, MAX_SPEED);
-          const stepDist = desiredSpeed * dt;
-
-          if (stepDist >= dist) {
-            state.posX = state.targetPosX;
-            state.posY = state.targetPosY;
-          } else {
-            state.posX += (dX / dist) * stepDist;
-            state.posY += (dY / dist) * stepDist;
-          }
-        } else {
-          state.posX = state.targetPosX;
-          state.posY = state.targetPosY;
-        }
-      }
-
-      // 3. Rotation Physics (Full Rotation + Resistance + Smooth Snap Back)
-      const dRot = state.targetRotation - state.rotation;
-      if (Math.abs(dRot) > 0.02) {
-        const MAX_ROT_SPEED = 420; // deg/sec: top speed once fully ramped
-        const ROT_RATE = 9.0; // gentle start — speed ramps up as the twist gap grows
-
-        const desiredRotSpeed = Math.min(Math.abs(dRot) * ROT_RATE, MAX_ROT_SPEED);
-        const rotStep = desiredRotSpeed * dt;
-
-        if (rotStep >= Math.abs(dRot)) {
-          state.rotation = state.targetRotation;
-        } else {
-          state.rotation += Math.sign(dRot) * rotStep;
-        }
-      } else {
-        state.rotation = state.targetRotation;
+        // --- 3. Scale spring — same spring config (Janitor wraps scale too) ---
+        const FScale = SPRING_STIFFNESS * (state.targetScale - state.scale) - SPRING_DAMPING * vel.scale;
+        vel.scale += (FScale / SPRING_MASS) * h;
+        state.scale += vel.scale * h;
       }
 
       renderTransform();
 
-      // Check if settled
-      const isSettled = !state.isDragging && !state.isPinching && !state.isZooming &&
-        Math.hypot(state.targetPosX - state.posX, state.targetPosY - state.posY) < 0.15 &&
-        Math.abs(state.targetScale - state.scale) < 0.0008 &&
-        Math.abs(state.targetRotation - state.rotation) < 0.05;
+      // Settle check: spring is at rest when all gaps AND all velocities ~ 0.
+      // Allowed even mid-hold — any new pointer event simply restarts the loop,
+      // so there is no busy rAF while the card is held perfectly still.
+      const speed = Math.hypot(vel.x, vel.y);
+      const isSettled =
+        Math.hypot(state.targetPosX - state.posX, state.targetPosY - state.posY) < 0.1 &&
+        Math.abs(state.targetRotation - state.rotation) < 0.05 &&
+        Math.abs(state.targetScale - state.scale) < 0.0006 &&
+        speed < 8 && Math.abs(vel.rot) < 25 && Math.abs(vel.scale) < 0.02;
 
       if (isSettled) {
         state.posX = state.targetPosX;
         state.posY = state.targetPosY;
         state.scale = state.targetScale;
         state.rotation = state.targetRotation;
+        vel.x = 0; vel.y = 0; vel.rot = 0; vel.scale = 0;
         renderTransform();
         animLoopRunning = false;
         return;
@@ -367,32 +340,19 @@ export function setup() {
     return Math.atan2(p2.y - p1.y, p2.x - p1.x);
   }
 
-  // Pure focal zoom: anchors focal point continuously without stutter
-  function zoomTowards(newScale: number, focalX: number, focalY: number, smooth = true) {
+  // Focal zoom through the spring — mirrors Janitor: raw motion values are
+  // set instantly (t.set(...), n.set(...)), the spring chases them.
+  // Ratio accumulates on TARGETS so repeated wheel steps compose cleanly and
+  // the resting state is exactly focal-invariant.
+  function zoomTowards(newScale: number, focalX: number, focalY: number, _smooth = true) {
     const clampedScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, newScale));
-    if (clampedScale === state.targetScale && !state.isZooming) return;
+    if (clampedScale === state.targetScale) return;
 
-    // Anchor focal snapshot
-    state.zoomAnchorFocalX = focalX;
-    state.zoomAnchorFocalY = focalY;
-    state.zoomAnchorBasePosX = state.posX;
-    state.zoomAnchorBasePosY = state.posY;
-    state.zoomAnchorBaseScale = state.scale;
+    const ratio = clampedScale / state.targetScale;
+    state.targetPosX = focalX - (focalX - state.targetPosX) * ratio;
+    state.targetPosY = focalY - (focalY - state.targetPosY) * ratio;
     state.targetScale = clampedScale;
-
-    if (!smooth) {
-      state.scale = clampedScale;
-      const ratio = state.scale / state.zoomAnchorBaseScale;
-      state.posX = focalX - (focalX - state.zoomAnchorBasePosX) * ratio;
-      state.posY = focalY - (focalY - state.zoomAnchorBasePosY) * ratio;
-      state.targetPosX = state.posX;
-      state.targetPosY = state.posY;
-      state.isZooming = false;
-      renderTransform();
-    } else {
-      state.isZooming = true;
-      runPhysicsLoop();
-    }
+    runPhysicsLoop();
   }
 
   function openAvatar(src: string, clickX?: number, clickY?: number) {
@@ -420,7 +380,7 @@ export function setup() {
 
     state.rotation = 0;
     state.targetRotation = 0;
-    state.isZooming = false;
+    vel.x = 0; vel.y = 0; vel.rot = 0; vel.scale = 0; // fresh spring on open
 
     // Janitor AI entrance: start with translateY(10%) and pop into final position
     overlay.style.transition = 'none';
@@ -460,10 +420,11 @@ export function setup() {
     e.stopPropagation();
 
     if (e.ctrlKey) {
-      // High-precision continuous trackpad pinch
+      // High-precision continuous trackpad pinch — accumulate from TARGET
+      // (Janitor: n.get() reads the last-set raw value, i.e. the target)
       const pinchZoomFactor = Math.exp(-e.deltaY * 0.012);
-      const nextScale = state.scale * pinchZoomFactor;
-      zoomTowards(nextScale, e.clientX, e.clientY, false);
+      const nextScale = state.targetScale * pinchZoomFactor;
+      zoomTowards(nextScale, e.clientX, e.clientY);
     } else {
       // Mouse wheel step
       const stepFactor = e.deltaY < 0 ? (1 + ZOOM_STEP) : (1 / (1 + ZOOM_STEP));
@@ -483,15 +444,14 @@ export function setup() {
 
     overlay.classList.remove('animating');
     overlay.style.transition = 'none';
-    state.isZooming = false;
 
     if (activePointers.size === 1) {
       state.isDragging = true;
       state.isPinching = false;
+      // Grab from the LAGGING position (Janitor: drag.from = () => [x.get(), y.get()]).
+      // Do NOT reset targets here — an in-flight glide continues under the finger.
       state.startX = e.clientX - state.posX;
       state.startY = e.clientY - state.posY;
-      state.targetPosX = state.posX;
-      state.targetPosY = state.posY;
 
       overlay.classList.add('dragging');
       runPhysicsLoop();
@@ -523,10 +483,8 @@ export function setup() {
       const currentAngle = getAngle(pts[0], pts[1]);
       const currentCenter = getCenter(pts[0], pts[1]);
 
-      // 1. Two-finger twist: incremental free rotation with governed ramp-up.
-      //    Small twist = slow spin; the further the fingers twist ahead of the
-      //    card, the faster it rotates, capped at MAX_ROT_SPEED (constant speed
-      //    beyond that) — the same resistance feel as the drag physics.
+      // 1. Two-finger twist: rotation target follows the twist (Janitor: m.set(offset));
+      //    the spring chases it — smooth, weighted, never 1:1 snappy.
       let deltaDeg = (currentAngle - state.lastPinchAngle) * (180 / Math.PI);
       while (deltaDeg > 180) deltaDeg -= 360;
       while (deltaDeg < -180) deltaDeg += 360;
@@ -534,12 +492,10 @@ export function setup() {
       if (Math.abs(deltaDeg) > 0.01) {
         state.targetRotation += deltaDeg;
         state.userRotated = true;
-        // Rotation chases the target in the physics loop (ramping speed),
-        // instead of snapping 1:1 to the finger angle.
-        runPhysicsLoop();
       }
 
-      // 2. Continuous two-finger pinch zoom: perfectly linear and seamless (no deadzone jumps!)
+      // 2. Pinch zoom — targets only (Janitor: n.set(offset), t.set(f-(o-1)*d));
+      //    the spring renders. Midpoint stays stationary under the fingers.
       if (state.initialDistance > 0) {
         const distRatio = currentDist / state.initialDistance;
         const nextScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, state.pinchStartScale * distRatio));
@@ -548,15 +504,12 @@ export function setup() {
         const panDeltaX = currentCenter.x - state.pinchFocalX;
         const panDeltaY = currentCenter.y - state.pinchFocalY;
 
-        state.scale = nextScale;
         state.targetScale = nextScale;
-        state.posX = state.pinchFocalX - (state.pinchFocalX - state.pinchStartPosX) * ratio + panDeltaX;
-        state.posY = state.pinchFocalY - (state.pinchFocalY - state.pinchStartPosY) * ratio + panDeltaY;
-        state.targetPosX = state.posX;
-        state.targetPosY = state.posY;
+        state.targetPosX = state.pinchFocalX - (state.pinchFocalX - state.pinchStartPosX) * ratio + panDeltaX;
+        state.targetPosY = state.pinchFocalY - (state.pinchFocalY - state.pinchStartPosY) * ratio + panDeltaY;
       }
 
-      renderTransform();
+      runPhysicsLoop();
     } else if (state.isDragging && activePointers.size === 1) {
       // Cursor moves ahead: sets target position
       state.targetPosX = e.clientX - state.startX;
