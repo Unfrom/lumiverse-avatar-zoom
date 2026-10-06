@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "name": "Lumi Avatar Zoom & Inspector",
+  "identifier": "lumi_avatar_zoom",
+  "author": "Unfrom",
+  "github": "https://github.com/Unfrom/lumiverse-avatar-zoom",
+  "homepage": "https://github.com/Unfrom/lumiverse-avatar-zoom",
+  "description": "Inspect and zoom character avatars in Lumiverse with a smooth JanitorAI-style floating lightbox modal.",
+  "permissions": [
+    "ui_panels"
+  ],
+  "entry_frontend": "dist/frontend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}

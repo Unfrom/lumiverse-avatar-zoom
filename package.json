@@ -1,0 +1,24 @@
+{
+  "name": "lumiverse-avatar-zoom",
+  "version": "1.0.0",
+  "description": "Lumiverse extension to click and zoom character avatars in a floating modal like JanitorAI",
+  "main": "dist/frontend.js",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/frontend.ts --bundle --outfile=dist/frontend.js --format=esm --target=es2022 --minify",
+    "build:dev": "esbuild src/frontend.ts --bundle --outfile=dist/frontend.js --format=esm --target=es2022"
+  },
+  "keywords": [
+    "lumiverse",
+    "spindle",
+    "extension",
+    "avatar-zoom",
+    "janitorai"
+  ],
+  "author": "Unfrom",
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.4.0"
+  }
+}
