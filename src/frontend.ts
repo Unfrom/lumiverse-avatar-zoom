@@ -13,7 +13,6 @@ interface FloatingState {
   startY: number;
   initialDistance: number;
   lastPinchAngle: number;
-  userRotated: boolean;
   pinchStartScale: number;
   pinchStartPosX: number;
   pinchStartPosY: number;
@@ -221,7 +220,6 @@ export function setup() {
     startY: 0,
     initialDistance: 0,
     lastPinchAngle: 0,
-    userRotated: false,
     pinchStartScale: 1,
     pinchStartPosX: 100,
     pinchStartPosY: 100,
@@ -483,15 +481,16 @@ export function setup() {
       const currentAngle = getAngle(pts[0], pts[1]);
       const currentCenter = getCenter(pts[0], pts[1]);
 
-      // 1. Two-finger twist: rotation target follows the twist (Janitor: m.set(offset));
-      //    the spring chases it — smooth, weighted, never 1:1 snappy.
+      // 1. Two-finger twist — the ONLY rotation input (exactly like Janitor:
+      //    rotateZ is written solely by onPinch). Gesture-relative: each new
+      //    pinch starts from 0° (use-gesture's pinch offset begins at 0),
+      //    so the target is just the twist delta of THIS gesture.
       let deltaDeg = (currentAngle - state.lastPinchAngle) * (180 / Math.PI);
       while (deltaDeg > 180) deltaDeg -= 360;
       while (deltaDeg < -180) deltaDeg += 360;
       state.lastPinchAngle = currentAngle;
       if (Math.abs(deltaDeg) > 0.01) {
-        state.targetRotation += deltaDeg;
-        state.userRotated = true;
+        state.targetRotation = deltaDeg;
       }
 
       // 2. Pinch zoom — targets only (Janitor: n.set(offset), t.set(f-(o-1)*d));
@@ -511,21 +510,11 @@ export function setup() {
 
       runPhysicsLoop();
     } else if (state.isDragging && activePointers.size === 1) {
-      // Cursor moves ahead: sets target position
+      // Cursor moves ahead: sets target position. Drag NEVER rotates —
+      // Janitor's onDrag writes x/y only, and there is no desktop rotation
+      // input of any kind (wheel only writes scale).
       state.targetPosX = e.clientX - state.startX;
       state.targetPosY = e.clientY - state.startY;
-
-      // Rotation is strictly gesture-gated: ONLY Shift+drag (desktop) or a
-      // two-finger twist (touch). A plain drag must NEVER rotate the card.
-      // If the card was twisted, that rotation is HELD while the finger
-      // stays down — no snap-back and no override until a full release.
-      if (e.shiftKey && !state.userRotated) {
-        const rect = overlay.getBoundingClientRect();
-        const centerX = rect.left + rect.width / 2;
-        const centerY = rect.top + rect.height / 2;
-        const currentAngleRad = Math.atan2(e.clientY - centerY, e.clientX - centerX);
-        state.targetRotation = currentAngleRad * (180 / Math.PI);
-      }
 
       runPhysicsLoop();
     }
@@ -540,12 +529,10 @@ export function setup() {
       state.isPinching = false;
       overlay.classList.remove('dragging');
 
-      // Normalize current rotation to [-180, 180] so snap-back takes the shortest, smoothest angular path back to 0°
-      state.rotation = ((state.rotation % 360) + 540) % 360 - 180;
-      state.targetRotation = 0;
-      state.userRotated = false; // finger fully lifted — glide back to 0° now
+      // Janitor has NO snap-back: rotation stays exactly where the twist
+      // left it (no onRelease handler touches rotateZ). Nothing to reset.
 
-      // Ensure physics finishes gliding into place and snaps back smoothly
+      // Ensure physics finishes gliding into place
       runPhysicsLoop();
       savePrefs(state.targetScale, state.targetPosX, state.targetPosY);
     } else if (activePointers.size === 1) {
