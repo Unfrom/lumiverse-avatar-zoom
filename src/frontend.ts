@@ -562,21 +562,16 @@ export function setup() {
       state.targetPosX = e.clientX - state.startX;
       state.targetPosY = e.clientY - state.startY;
 
-      // When dragging with mouse/pointer, holding Shift allows free manual rotation around center,
-      // or standard drag tilts dynamically into the movement
-      // If the user has twisted the card, that rotation is HELD while the finger
-      // stays down — no snap-back and no tilt override until a full release.
-      if (state.userRotated) {
-        // keep targetRotation exactly as twisted
-      } else if (e.shiftKey) {
+      // Rotation is strictly gesture-gated: ONLY Shift+drag (desktop) or a
+      // two-finger twist (touch). A plain drag must NEVER rotate the card.
+      // If the card was twisted, that rotation is HELD while the finger
+      // stays down — no snap-back and no override until a full release.
+      if (e.shiftKey && !state.userRotated) {
         const rect = overlay.getBoundingClientRect();
         const centerX = rect.left + rect.width / 2;
         const centerY = rect.top + rect.height / 2;
         const currentAngleRad = Math.atan2(e.clientY - centerY, e.clientX - centerX);
         state.targetRotation = currentAngleRad * (180 / Math.PI);
-      } else {
-        const pullDeltaX = state.targetPosX - state.posX;
-        state.targetRotation = pullDeltaX * 0.12; // Natural dynamic tilt into drag
       }
 
       runPhysicsLoop();
